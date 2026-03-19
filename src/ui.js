@@ -71,21 +71,22 @@ export async function askToken() {
 }
 
 export async function askOutputDir(repoName) {
-  // Default: Desktop/<repoName> — works on Mac, Linux, Windows
+  // Ask for the PARENT folder — we always append repoName automatically
   const desktop = path.join(os.homedir(), 'Desktop');
-  const defaultDir = path.join(desktop, repoName);
 
   const { dir } = await inquirer.prompt([{
     type: 'input',
     name: 'dir',
-    message: 'Save folder to:',
-    default: defaultDir,
+    message: `Save inside (a folder "${repoName}" will be created here):`,
+    default: desktop,
     validate(input) {
       if (!input.trim()) return 'Please enter a valid path.';
       return true;
     },
   }]);
-  return dir.trim();
+
+  // Always force <chosenDir>/<repoName> so files are never scattered
+  return path.join(dir.trim(), repoName);
 }
 
 // ─── File Browser ─────────────────────────────────────────────────────────────
