@@ -1,0 +1,28 @@
+# Development & config
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Docs & community files (no las necesita quien instala el paquete)
+docs/
+CONTRIBUTING.md
+CONTRIBUTING.es.md
+README.es.md
+.github/
+
+# Env & logs
+.env
+.env.local
+npm-debug.log*
+*.log
+
+# Test & coverage (si los agregás en el futuro)
+coverage/
+*.test.js
+*.spec.js
+
+# Build artifacts
+dist/
+build/
