@@ -6,6 +6,11 @@
   "bin": {
     "repoget": "./bin/repoget.js"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md"
+  ],
   "scripts": {
     "start": "node bin/repoget.js"
   },
@@ -20,7 +25,8 @@
     "github",
     "download",
     "cli",
-    "repository"
+    "repository",
+    "selective"
   ],
   "license": "MIT"
 }
