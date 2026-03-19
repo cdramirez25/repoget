@@ -1,11 +1,12 @@
-import inquirer from 'inquirer';
 import chalk from 'chalk';
 import path from 'path';
+import os from 'os';
+import inquirer from 'inquirer';
 
-export const BACK = '__BACK__';
-export const CANCEL = '__CANCEL__';
+const HIDE_CURSOR = '\x1b[?25l';
+const SHOW_CURSOR = '\x1b[?25h';
 
-// ─── Decorative output ───────────────────────────────────────────────────────
+// ─── Welcome & prints ────────────────────────────────────────────────────────
 
 export function printWelcome() {
   console.log('');
@@ -29,16 +30,8 @@ export function printInfo(msg) {
   console.log(chalk.blue('  ℹ  ') + chalk.gray(msg));
 }
 
-export function printWarning(msg) {
-  console.log(chalk.yellow('  ⚠  ') + chalk.yellow(msg));
-}
+// ─── Simple prompts (use inquirer — not inside raw mode) ─────────────────────
 
-// ─── Prompts ─────────────────────────────────────────────────────────────────
-
-/**
- * Prints usage examples and asks the user to paste a GitHub URL.
- * @returns {Promise<string>}
- */
 export async function askRepoUrl() {
   console.log(chalk.gray('  How to use:'));
   console.log(
@@ -63,15 +56,10 @@ export async function askRepoUrl() {
       return true;
     },
   }]);
-
   console.log('');
   return url.trim();
 }
 
-/**
- * Asks for an optional GitHub token.
- * @returns {Promise<string|null>}
- */
 export async function askToken() {
   const { token } = await inquirer.prompt([{
     type: 'password',
@@ -82,99 +70,372 @@ export async function askToken() {
   return token ? token.trim() : null;
 }
 
-/**
- * Shows ALL files in a single grouped checkbox.
- * The user selects everything they want across all folders in one pass.
- *
- * Controls shown:
- *   Space  = toggle file
- *   Enter  = confirm selection
- *
- * Returns BACK or an array of selected files.
- *
- * @param {Array<{ path: string, size: number }>} files
- * @param {Array<{ path: string, size: number }>} previousSelection  — pre-checked files when re-entering
- * @returns {Promise<string | Array>}
- */
-export async function askFileSelection(files, previousSelection = []) {
-  const prevPaths = new Set(previousSelection.map((f) => f.path));
+export async function askOutputDir(repoName) {
+  // Default: Desktop/<repoName> — works on Mac, Linux, Windows
+  const desktop = path.join(os.homedir(), 'Desktop');
+  const defaultDir = path.join(desktop, repoName);
 
-  console.log('');
-  console.log(
-    chalk.gray('  Space') + chalk.white(' = select/deselect  ') +
-    chalk.gray('↑↓') + chalk.white(' = move  ') +
-    chalk.gray('Enter') + chalk.white(' = confirm')
-  );
-  console.log('');
-
-  const choices = buildFileChoices(files, prevPaths);
-
-  const { selected } = await inquirer.prompt([{
-    type: 'checkbox',
-    name: 'selected',
-    message: `Pick the files you want to download ${chalk.gray('(' + files.length + ' total)')}:`,
-    choices,
-    pageSize: 24,
-  }]);
-
-  // After checkbox, show a small action menu so the user can confirm or go back
-  const hasFiles = selected.length > 0;
-  const totalSize = selected.reduce((acc, f) => acc + (f.size ?? 0), 0);
-  const countLabel = hasFiles
-    ? chalk.yellow.bold(String(selected.length)) + chalk.white(' file(s) selected') +
-      (totalSize > 0 ? chalk.gray(` (~${formatBytes(totalSize)})`) : '')
-    : chalk.yellow('No files selected');
-
-  console.log('');
-  console.log('  ' + countLabel);
-  console.log('');
-
-  const actionChoices = [];
-  if (hasFiles) {
-    actionChoices.push({ name: chalk.green('⬇  Download selected files'), value: 'confirm' });
-  }
-  actionChoices.push({ name: chalk.gray('↩  Select again') + chalk.dim(' (go back to the list)'), value: 'reselect' });
-  actionChoices.push({ name: chalk.gray('⬅  Change repository URL'), value: BACK });
-  actionChoices.push({ name: chalk.red('✖  Cancel'), value: CANCEL });
-
-  const { action } = await inquirer.prompt([{
-    type: 'list',
-    name: 'action',
-    message: 'What do you want to do?',
-    choices: actionChoices,
-  }]);
-
-  if (action === 'reselect') {
-    // Re-run this function keeping the current selection pre-checked
-    return askFileSelection(files, selected);
-  }
-
-  return action === 'confirm' ? selected : action;
-}
-
-/**
- * Asks the user where to save the downloaded files.
- * @returns {Promise<string>}
- */
-export async function askOutputDir() {
   const { dir } = await inquirer.prompt([{
     type: 'input',
     name: 'dir',
-    message: 'Save files to:',
-    default: './repoget-output',
+    message: 'Save folder to:',
+    default: defaultDir,
     validate(input) {
-      if (!input.trim()) return 'Please enter a valid directory path.';
+      if (!input.trim()) return 'Please enter a valid path.';
       return true;
     },
   }]);
   return dir.trim();
 }
 
+// ─── File Browser ─────────────────────────────────────────────────────────────
+//
+//  Controls:
+//    ↑ ↓          — move cursor
+//    Space        — enter folder  /  toggle file selection
+//    A            — select all visible files / deselect all
+//    Q            — go back (exit folder → parent, or exit "all" → root)
+//    Enter        — confirm selection & proceed to download
+//    Ctrl+C       — cancel
+//
+//  Two modes:
+//    'browse'  — classic folder tree navigation
+//    'all'     — flat grouped view of every file in the repo
+
+/**
+ * Runs the interactive file browser.
+ * @param {Array<{path:string, size:number}>} allFiles
+ * @returns {Promise<Array<{path:string, size:number}> | null>}  null = cancelled
+ */
+export function runBrowser(allFiles) {
+  return new Promise((resolve) => {
+
+    // ── State ────────────────────────────────────────────────────────────────
+    const selected  = new Set();          // Set of selected file paths
+    let stack       = [];                 // [{folderName, cursor}] nav history
+    let cursor      = 0;
+    let mode        = 'browse';           // 'browse' | 'all'
+    let cursorBeforeAll = 0;              // restore cursor when leaving 'all'
+    let renderedLines = 0;
+
+    // ── Item builders ────────────────────────────────────────────────────────
+
+    function getPrefix() {
+      return stack.length > 0 ? stack.map(s => s.folderName).join('/') + '/' : '';
+    }
+
+    /**
+     * Returns the list of "rows" to display.
+     * Types:
+     *   showall  — "Show all files" option (root only)
+     *   back     — ".." row (inside a folder)
+     *   folder   — a sub-directory
+     *   file     — a selectable file
+     *   dirlabel — non-selectable directory heading (only in 'all' mode)
+     */
+    function getItems() {
+      if (mode === 'all') {
+        const items = [];
+        let lastDir = null;
+        const sorted = [...allFiles].sort((a, b) => a.path.localeCompare(b.path));
+        for (const f of sorted) {
+          const dir = path.dirname(f.path);
+          const dirLabel = dir === '.' ? '/' : dir + '/';
+          if (dirLabel !== lastDir) {
+            items.push({ type: 'dirlabel', label: dirLabel });
+            lastDir = dirLabel;
+          }
+          items.push({ type: 'file', file: f });
+        }
+        return items;
+      }
+
+      // ── Browse mode ──────────────────────────────────────────────────────
+      const prefix   = getPrefix();
+      const folders  = new Set();
+      const files    = [];
+
+      for (const f of allFiles) {
+        if (prefix && !f.path.startsWith(prefix)) continue;
+        const rest  = prefix ? f.path.slice(prefix.length) : f.path;
+        const parts = rest.split('/');
+        if (parts.length === 1) {
+          files.push(f);
+        } else {
+          folders.add(parts[0]);
+        }
+      }
+
+      const items = [];
+      if (stack.length === 0) {
+        items.push({ type: 'showall' });
+      } else {
+        items.push({ type: 'back' });
+      }
+
+      for (const name of [...folders].sort()) {
+        items.push({ type: 'folder', name, fullPath: prefix + name });
+      }
+      for (const f of files.sort((a, b) => a.path.localeCompare(b.path))) {
+        items.push({ type: 'file', file: f });
+      }
+
+      return items;
+    }
+
+    // Skip non-selectable dirlabel rows when moving cursor
+    function nextSelectable(items, from, dir) {
+      let i = from + dir;
+      while (i >= 0 && i < items.length && items[i].type === 'dirlabel') i += dir;
+      if (i < 0 || i >= items.length) return from;
+      return i;
+    }
+
+    function firstSelectable(items) {
+      const i = items.findIndex(it => it.type !== 'dirlabel');
+      return i === -1 ? 0 : i;
+    }
+
+    // ── Render ───────────────────────────────────────────────────────────────
+
+    function render() {
+      const items      = getItems();
+      const termH      = process.stdout.rows  || 30;
+      const termW      = process.stdout.columns || 80;
+      const maxVisible = Math.max(5, termH - 9);
+
+      // Scroll viewport so cursor is always visible
+      const viewStart = Math.max(
+        0,
+        Math.min(cursor - Math.floor(maxVisible / 2), items.length - maxVisible)
+      );
+      const viewEnd = Math.min(items.length, viewStart + maxVisible);
+
+      const lines = [];
+
+      // ── Header ────────────────────────────────────────────────────────────
+      const breadcrumb = mode === 'all'
+        ? 'All files'
+        : (stack.length === 0 ? '/' : stack.map(s => s.folderName).join('/') + '/');
+
+      lines.push('');
+      lines.push('  ' + chalk.bold.cyan('📁 ') + chalk.bold.white(breadcrumb));
+      lines.push('  ' + chalk.gray('─'.repeat(Math.min(termW - 4, 60))));
+
+      // ── Items ─────────────────────────────────────────────────────────────
+      for (let i = viewStart; i < viewEnd; i++) {
+        const item      = items[i];
+        const isCursor  = i === cursor;
+
+        // Directory heading (non-selectable, no cursor arrow)
+        if (item.type === 'dirlabel') {
+          lines.push(
+            chalk.gray('  ── ') + chalk.cyan(item.label) +
+            chalk.gray('─'.repeat(Math.max(0, Math.min(termW - 8, 54) - item.label.length)))
+          );
+          continue;
+        }
+
+        const arrow = isCursor ? chalk.cyan('▶ ') : '  ';
+
+        if (item.type === 'showall') {
+          lines.push(arrow + chalk.white.italic('  [ Show all files ]'));
+
+        } else if (item.type === 'back') {
+          lines.push(arrow + chalk.gray('  ← ..  ') + chalk.dim('(press Q to go back)'));
+
+        } else if (item.type === 'folder') {
+          const hi = isCursor ? chalk.yellow.bold : chalk.yellow;
+          lines.push(arrow + hi('📁 ') + (isCursor ? chalk.white.bold(item.name + '/') : chalk.white(item.name + '/')));
+
+        } else if (item.type === 'file') {
+          const isSel  = selected.has(item.file.path);
+          const check  = isSel ? chalk.green('[✓]') : chalk.gray('[ ]');
+          const nameFn = isSel
+            ? (isCursor ? chalk.green.bold : chalk.green)
+            : (isCursor ? chalk.white.bold : chalk.white);
+          const name = nameFn(path.basename(item.file.path));
+          const size = item.file.size ? chalk.gray('  ' + formatBytes(item.file.size)) : '';
+          lines.push(arrow + check + ' ' + name + size);
+        }
+      }
+
+      // Scroll hint
+      if (items.filter(i => i.type !== 'dirlabel').length > maxVisible) {
+        lines.push(chalk.gray(`    ↕  showing ${viewStart + 1}–${viewEnd} of ${items.length}`));
+      }
+
+      // ── Footer ────────────────────────────────────────────────────────────
+      lines.push('  ' + chalk.gray('─'.repeat(Math.min(termW - 4, 60))));
+
+      // Selection count
+      const selCount = selected.size;
+      const selSize  = [...selected].reduce((acc, p) => {
+        const f = allFiles.find(f => f.path === p);
+        return acc + (f?.size ?? 0);
+      }, 0);
+      const selLabel = selCount > 0
+        ? chalk.yellow.bold(String(selCount)) + chalk.gray(' file(s) selected') +
+          (selSize > 0 ? chalk.gray(` (~${formatBytes(selSize)})`) : '')
+        : chalk.gray('No files selected yet');
+      lines.push('  ' + selLabel);
+
+      // Key legend
+      lines.push(
+        '  ' +
+        chalk.gray('Space') + chalk.white('=select/enter  ') +
+        chalk.gray('A') + chalk.white('=select all  ') +
+        chalk.gray('Q') + chalk.white('=back  ') +
+        chalk.gray('Enter') + chalk.white('=download')
+      );
+      lines.push('');
+
+      // ── Draw ──────────────────────────────────────────────────────────────
+      if (renderedLines > 0) {
+        process.stdout.write(`\x1b[${renderedLines}A`);
+      }
+      for (const line of lines) {
+        process.stdout.write('\x1b[2K\r' + line + '\n');
+      }
+      // Clear leftover lines if render shrank
+      const extra = renderedLines - lines.length;
+      if (extra > 0) {
+        for (let i = 0; i < extra; i++) process.stdout.write('\x1b[2K\r\n');
+        process.stdout.write(`\x1b[${extra}A`);
+      }
+      renderedLines = lines.length;
+    }
+
+    // ── Key handler ──────────────────────────────────────────────────────────
+
+    function onKey(key) {
+      const items = getItems();
+
+      // Ctrl+C
+      if (key === '\x03') {
+        cleanup();
+        console.log('\n');
+        resolve(null);
+        return;
+      }
+
+      // ↑ Up
+      if (key === '\x1b[A') {
+        cursor = nextSelectable(items, cursor, -1);
+        render();
+        return;
+      }
+
+      // ↓ Down
+      if (key === '\x1b[B') {
+        cursor = nextSelectable(items, cursor, +1);
+        render();
+        return;
+      }
+
+      // Space — enter folder or toggle file
+      if (key === ' ') {
+        const item = items[cursor];
+        if (!item) return;
+
+        if (item.type === 'file') {
+          if (selected.has(item.file.path)) {
+            selected.delete(item.file.path);
+          } else {
+            selected.add(item.file.path);
+          }
+
+        } else if (item.type === 'folder') {
+          stack.push({ folderName: item.name, cursor });
+          cursor = 0;
+
+        } else if (item.type === 'showall') {
+          cursorBeforeAll = cursor;
+          mode   = 'all';
+          cursor = firstSelectable(getItems());
+
+        } else if (item.type === 'back') {
+          doBack();
+          return;
+        }
+
+        render();
+        return;
+      }
+
+      // Q — go back
+      if (key === 'q' || key === 'Q') {
+        doBack();
+        return;
+      }
+
+      // A — toggle all visible files
+      if (key === 'a' || key === 'A') {
+        const fileItems = items.filter(i => i.type === 'file');
+        const allSel    = fileItems.length > 0 && fileItems.every(i => selected.has(i.file.path));
+        if (allSel) {
+          fileItems.forEach(i => selected.delete(i.file.path));
+        } else {
+          fileItems.forEach(i => selected.add(i.file.path));
+        }
+        render();
+        return;
+      }
+
+      // Enter — confirm
+      if (key === '\r' || key === '\n') {
+        if (selected.size === 0) {
+          // Nothing selected — do nothing (user must select something first)
+          return;
+        }
+        cleanup();
+        console.log('\n');
+        resolve(allFiles.filter(f => selected.has(f.path)));
+        return;
+      }
+    }
+
+    function doBack() {
+      if (mode === 'all') {
+        mode   = 'browse';
+        cursor = cursorBeforeAll;
+      } else if (stack.length > 0) {
+        const prev = stack.pop();
+        cursor = prev.cursor;
+      }
+      render();
+    }
+
+    function cleanup() {
+      process.stdout.write(SHOW_CURSOR);
+      try { process.stdin.setRawMode(false); } catch {}
+      process.stdin.pause();
+      process.stdin.removeListener('data', onKey);
+    }
+
+    // ── Start ────────────────────────────────────────────────────────────────
+    process.stdout.write(HIDE_CURSOR);
+    try {
+      process.stdin.setRawMode(true);
+    } catch {
+      // Not a real TTY (e.g. piped input) — can't use raw mode
+      cleanup();
+      resolve(null);
+      return;
+    }
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', onKey);
+
+    render();
+  });
+}
+
 // ─── Progress & Summary ───────────────────────────────────────────────────────
 
 export function printProgress(current, total, filePath) {
-  const pct = Math.round((current / total) * 100);
-  const bar = renderBar(pct);
+  const pct   = Math.round((current / total) * 100);
+  const bar   = renderBar(pct);
   const label = filePath.length > 45 ? '…' + filePath.slice(-44) : filePath;
   process.stdout.write(
     `\r  ${bar} ${chalk.gray(String(pct).padStart(3) + '%')}  ${chalk.white(label)}` + ' '.repeat(5)
@@ -184,7 +445,6 @@ export function printProgress(current, total, filePath) {
 
 export function printSummary(downloaded, failed, totalBytes, outputDir) {
   const absolutePath = path.resolve(outputDir);
-
   console.log('\n  ' + chalk.gray('─'.repeat(54)));
   console.log(
     chalk.green.bold(`  ✔  Downloaded: ${downloaded} file(s)`) +
@@ -192,9 +452,7 @@ export function printSummary(downloaded, failed, totalBytes, outputDir) {
   );
   if (failed.length > 0) {
     console.log(chalk.red(`  ✖  Failed:     ${failed.length} file(s)`));
-    for (const f of failed) {
-      console.log(chalk.red('       • ') + chalk.gray(f));
-    }
+    for (const f of failed) console.log(chalk.red('       • ') + chalk.gray(f));
   }
   console.log('');
   console.log(chalk.bold('  📁 Files saved to:'));
@@ -204,43 +462,7 @@ export function printSummary(downloaded, failed, totalBytes, outputDir) {
   console.log('  ' + chalk.gray('─'.repeat(54)) + '\n');
 }
 
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
-/**
- * Builds grouped checkbox choices. Files are sorted and grouped by top-level folder.
- * Items in prevPaths are pre-checked.
- */
-function buildFileChoices(files, prevPaths = new Set()) {
-  const choices = [];
-  let lastDir = null;
-
-  const sorted = [...files].sort((a, b) => a.path.localeCompare(b.path));
-
-  for (const file of sorted) {
-    const dir = path.dirname(file.path);
-    const dirLabel = dir === '.' ? '/ (root)' : dir;
-
-    if (dirLabel !== lastDir) {
-      choices.push(new inquirer.Separator(
-        chalk.gray('── ') + chalk.cyan(dirLabel) +
-        chalk.gray(' ' + '─'.repeat(Math.max(0, 44 - dirLabel.length)))
-      ));
-      lastDir = dirLabel;
-    }
-
-    const basename = path.basename(file.path);
-    const size = file.size != null ? chalk.gray('  ' + formatBytes(file.size)) : '';
-
-    choices.push({
-      name: chalk.white(basename) + size,
-      value: file,
-      short: file.path,
-      checked: prevPaths.has(file.path),
-    });
-  }
-
-  return choices;
-}
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function renderBar(pct, width = 24) {
   const filled = Math.round((pct / 100) * width);
@@ -249,7 +471,7 @@ function renderBar(pct, width = 24) {
 
 function formatBytes(bytes) {
   if (!bytes || bytes === 0) return '0 B';
-  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_024)         return `${bytes} B`;
   if (bytes < 1_024 * 1_024) return `${(bytes / 1_024).toFixed(1)} KB`;
   return `${(bytes / (1_024 * 1_024)).toFixed(2)} MB`;
 }
