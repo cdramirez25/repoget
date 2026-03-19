@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Lock files (optional — many projects sí los commitean)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# Build / output
+dist/
+build/
+
+# Editor & OS
+.DS_Store          # macOS
+Thumbs.db          # Windows
+.vscode/
+.idea/
+*.swp              # Vim
+
+# Test coverage
+coverage/

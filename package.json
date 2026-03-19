@@ -1,0 +1,26 @@
+{
+  "name": "repoget",
+  "version": "1.0.0",
+  "description": "CLI to selectively download files from any GitHub repository",
+  "type": "module",
+  "bin": {
+    "repoget": "./bin/repoget.js"
+  },
+  "scripts": {
+    "start": "node bin/repoget.js"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "inquirer": "^9.2.12"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "github",
+    "download",
+    "cli",
+    "repository"
+  ],
+  "license": "MIT"
+}
