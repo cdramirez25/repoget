@@ -11,6 +11,15 @@
     "src/",
     "README.md"
   ],
+  "homepage": "https://github.com/cdramirez25/repoget#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cdramirez25/repoget.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cdramirez25/repoget/issues"
+  },
+  "author": "Cristian Ramirez",
   "scripts": {
     "start": "node bin/repoget.js"
   },

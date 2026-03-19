@@ -13,6 +13,11 @@
 
 Created by **Cristian Ramirez**
 
+[![npm version](https://img.shields.io/npm/v/repoget.svg?style=flat-square&color=blue)](https://www.npmjs.com/package/repoget)
+[![npm downloads](https://img.shields.io/npm/dm/repoget.svg?style=flat-square&color=green)](https://www.npmjs.com/package/repoget)
+[![node version](https://img.shields.io/node/v/repoget.svg?style=flat-square&color=brightgreen)](https://nodejs.org)
+[![license](https://img.shields.io/npm/l/repoget.svg?style=flat-square&color=orange)](LICENSE)
+
 ---
 
 🌐 **Language / Idioma**  
@@ -166,6 +171,7 @@ repoget/
 │   ├── browser.js       ← Raw-terminal interactive file browser
 │   └── ui.js            ← Prompts, progress bar & output formatting
 ├── .gitignore
+├── .npmignore
 ├── CONTRIBUTING.md
 ├── package.json
 └── README.md
